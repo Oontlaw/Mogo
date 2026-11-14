@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mogo"
+version = "0.1.0"
+description = "A small decoder-only language model implemented in plain PyTorch"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pypdf>=5.0",
+    "PyYAML>=6.0",
+    "tokenizers>=0.15",
+    "torch>=2.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["mogo*"]
