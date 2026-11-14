@@ -1,20 +1,89 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 from pypdf import PdfWriter
 
 from mogo.data.books import read_book_text
 from mogo.data.clean import clean_text
 from mogo.data.dataset import TokenMemmap
-from mogo.data.prepare import split_books
+from mogo.data.prepare import _unique_books, prepare, split_books
 
 
 class DataTests(unittest.TestCase):
     def test_clean_text_preserves_paragraphs_and_removes_noise(self):
         self.assertEqual(clean_text("  A  \r\n\r\n\r\nB\x00\tC  "), "A\n\nB C")
+
+    def test_clean_text_strips_gutenberg_header_and_footer(self):
+        text = (
+            "Preamble\n"
+            "*** START OF THE PROJECT GUTENBERG EBOOK EXAMPLE ***\n"
+            "Title\n\nBody text.\n"
+            "*** END OF THIS PROJECT GUTENBERG EBOOK EXAMPLE ***\n"
+            "Footer\n"
+        )
+        self.assertEqual(clean_text(text), "Title\n\nBody text.")
+
+    def test_clean_text_handles_this_start_and_the_end_variants(self):
+        text = (
+            "*** START OF THIS PROJECT GUTENBERG EBOOK EXAMPLE ***\n"
+            "Body text.\n"
+            "*** END OF THE PROJECT GUTENBERG EBOOK EXAMPLE ***\n"
+        )
+        self.assertEqual(clean_text(text), "Body text.")
+
+    def test_duplicate_books_are_skipped_by_cleaned_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.txt"
+            duplicate = Path(directory) / "duplicate.txt"
+            different = Path(directory) / "different.txt"
+            first.write_text("Same book\n", encoding="utf-8")
+            duplicate.write_text("Same book\n", encoding="utf-8")
+            different.write_text("Another book\n", encoding="utf-8")
+            unique, skipped = _unique_books([first, duplicate, different])
+            self.assertEqual(unique, [first, different])
+            self.assertEqual(skipped, 1)
+
+    def test_prepare_creates_outputs_from_three_text_books(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "books"
+            output_dir = root / "processed"
+            input_dir.mkdir()
+            for index in range(3):
+                (input_dir / f"book-{index}.txt").write_text(
+                    (f"Book {index} has a different story. " * 20),
+                    encoding="utf-8",
+                )
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "seed": 17,
+                        "data": {
+                            "input_dir": str(input_dir),
+                            "output_dir": str(output_dir),
+                            "validation_fraction": 0.34,
+                            "vocab_size": 300,
+                            "min_token_frequency": 2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            prepare(config_path)
+            for name in ("tokenizer.json", "train.bin", "val.bin", "data_meta.json"):
+                self.assertTrue((output_dir / name).is_file(), name)
+            metadata = json.loads(
+                (output_dir / "data_meta.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(metadata["train_books"]), 2)
+            self.assertEqual(len(metadata["validation_books"]), 1)
+            self.assertEqual(metadata["dtype"], "uint16")
 
     def test_book_split_is_reproducible_and_disjoint(self):
         books = [Path(f"book-{index}.txt") for index in range(10)]

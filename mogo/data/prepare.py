@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -24,6 +25,21 @@ def split_books(
     validation_count = max(1, round(len(shuffled) * validation_fraction))
     validation_count = min(validation_count, len(shuffled) - 1)
     return shuffled[validation_count:], shuffled[:validation_count]
+
+
+def _unique_books(book_paths: list[Path]) -> tuple[list[Path], int]:
+    unique_paths = []
+    seen_hashes = set()
+    skipped = 0
+    for path in book_paths:
+        content = clean_text(read_book_text(path)).encode("utf-8")
+        content_hash = hashlib.sha256(content).digest()
+        if content_hash in seen_hashes:
+            skipped += 1
+            continue
+        seen_hashes.add(content_hash)
+        unique_paths.append(path)
+    return unique_paths, skipped
 
 
 def _token_count(paths: list[Path], tokenizer: Tokenizer, end_id: int) -> int:
@@ -65,6 +81,8 @@ def prepare(config_path: str | Path) -> None:
     )
     if not book_paths:
         raise FileNotFoundError(f"No .txt or .pdf books found under {input_dir}")
+    book_paths, duplicate_count = _unique_books(book_paths)
+    print(f"Skipped {duplicate_count} duplicate book(s)")
 
     train_books, validation_books = split_books(
         book_paths,

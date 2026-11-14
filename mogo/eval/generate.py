@@ -1,8 +1,10 @@
+import argparse
+
 import torch
 from tokenizers import Tokenizer
 
 from mogo.data.tokenizer import END_OF_BOOK
-from mogo.model.gpt import GPT
+from mogo.model.gpt import GPT, GPTConfig
 
 
 @torch.no_grad()
@@ -46,3 +48,35 @@ def generate(
     finally:
         model.train(was_training)
     return tokenizer.decode(input_ids[0].tolist())
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate text with a MOGO checkpoint")
+    parser.add_argument("--checkpoint", default="checkpoints/last.pt")
+    parser.add_argument("--tokenizer", default="data/processed/tokenizer.json")
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--max-new-tokens", type=int, default=200)
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=50)
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    model = GPT(GPTConfig(**state["model_config"]))
+    model.load_state_dict(state["model"])
+    model.to(device)
+    tokenizer = Tokenizer.from_file(args.tokenizer)
+    print(
+        generate(
+            model,
+            tokenizer,
+            args.prompt,
+            args.max_new_tokens,
+            args.temperature,
+            args.top_k,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

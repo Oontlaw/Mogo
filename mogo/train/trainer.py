@@ -1,6 +1,7 @@
 import argparse
 import math
 import random
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +54,7 @@ def _checkpoint_state(
 ) -> dict:
     return {
         "step": step,
+        "model_config": asdict(model.config),
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict(),
@@ -61,6 +63,33 @@ def _checkpoint_state(
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
     }
+
+
+def _optimizer_parameter_groups(model: GPT, weight_decay: float) -> list[dict]:
+    decay_parameters = []
+    no_decay_parameters = []
+    embedding_weight = model.token_embedding.weight
+    seen_parameters = set()
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or id(parameter) in seen_parameters:
+            continue
+        seen_parameters.add(id(parameter))
+        if (
+            parameter.ndim == 2
+            and name.endswith(".weight")
+            and parameter is not embedding_weight
+        ):
+            decay_parameters.append(parameter)
+        else:
+            no_decay_parameters.append(parameter)
+    print(
+        "AdamW parameter tensors: "
+        f"decay={len(decay_parameters)}, no_decay={len(no_decay_parameters)}"
+    )
+    return [
+        {"params": decay_parameters, "weight_decay": weight_decay},
+        {"params": no_decay_parameters, "weight_decay": 0.0},
+    ]
 
 
 def _save_checkpoint(path: Path, state: dict) -> None:
@@ -78,9 +107,10 @@ def _evaluate(
     batch_size: int,
     sequence_length: int,
     device: torch.device,
-    rng: np.random.Generator,
+    seed: int,
     amp_dtype: torch.dtype | None,
 ) -> tuple[float, float]:
+    rng = np.random.default_rng(seed + 2)
     model.eval()
     losses = []
     for _ in range(batches):
@@ -145,10 +175,9 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     print(f"Device: {device}; trainable parameters: {count_parameters(model):,}")
 
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        _optimizer_parameter_groups(model, float(training_config["weight_decay"])),
         lr=float(training_config["learning_rate"]),
         betas=(float(training_config["beta1"]), float(training_config["beta2"])),
-        weight_decay=float(training_config["weight_decay"]),
         foreach=False,
     )
     scaler = torch.amp.GradScaler(
@@ -156,7 +185,10 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     )
     checkpoint_dir = Path(training_config["output_dir"])
     last_checkpoint = checkpoint_dir / "last.pt"
+    best_checkpoint = checkpoint_dir / "best.pt"
     start_step = 0
+    best_val_loss = math.inf
+    batch_rng_state = None
     if resume:
         if not last_checkpoint.is_file():
             raise FileNotFoundError(f"Cannot resume; checkpoint not found: {last_checkpoint}")
@@ -169,15 +201,28 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         np.random.set_state(state["numpy_rng"])
         torch.set_rng_state(state["torch_rng"].cpu())
         if torch.cuda.is_available() and state["cuda_rng"] is not None:
-            torch.cuda.set_rng_state_all(state["cuda_rng"])
+            torch.cuda.set_rng_state_all(
+                [rng_state.cpu() for rng_state in state["cuda_rng"]]
+            )
+        batch_rng_state = state["batch_rng_state"]
+        del state
+        if best_checkpoint.is_file():
+            best_state = torch.load(
+                best_checkpoint, map_location="cpu", weights_only=False
+            )
+            best_val_loss = float(best_state.get("val_loss", math.inf))
+            del best_state
         print(f"Resuming from step {start_step}")
 
     batch_size = int(training_config["micro_batch_size"])
+    eval_batch_size = int(training_config.get("eval_batch_size", batch_size))
+    if eval_batch_size < 1:
+        raise ValueError("training.eval_batch_size must be positive")
     accumulation = int(training_config["gradient_accumulation_steps"])
     max_steps = int(training_config["max_steps"])
     batch_rng = np.random.default_rng(int(config["seed"]) + 1)
     if resume:
-        batch_rng.bit_generator.state = state["batch_rng_state"]
+        batch_rng.bit_generator.state = batch_rng_state
 
     for step in range(start_step, max_steps):
         learning_rate = cosine_learning_rate(
@@ -221,13 +266,22 @@ def train(config_path: str | Path, resume: bool = False) -> None:
                 model,
                 val_data,
                 int(training_config["eval_batches"]),
-                batch_size,
+                eval_batch_size,
                 sequence_length,
                 device,
-                batch_rng,
+                int(config["seed"]),
                 amp_dtype,
             )
             print(f"validation loss {val_loss:.4f} perplexity {perplexity:.2f}")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = _checkpoint_state(
+                    model, optimizer, scaler, completed_step
+                )
+                best_state["batch_rng_state"] = batch_rng.bit_generator.state
+                best_state["val_loss"] = val_loss
+                _save_checkpoint(best_checkpoint, best_state)
+                print(f"Saved best checkpoint to {best_checkpoint}")
         if completed_step % int(training_config["sample_interval"]) == 0:
             prompt = str(config["generation"]["prompt"])
             print(

@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import torch
@@ -45,6 +46,28 @@ def _apply_rope(x: torch.Tensor, theta: float) -> torch.Tensor:
     return rotated.flatten(-2)
 
 
+def _build_rope_cache(
+    sequence_length: int, head_dim: int, theta: float, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    inv_freq = 1.0 / (
+        theta
+        ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim)
+    )
+    positions = torch.arange(sequence_length, device=device, dtype=torch.float32)
+    angles = torch.outer(positions, inv_freq)
+    return angles.cos(), angles.sin()
+
+
+def _apply_rope_cached(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    cos = cos.to(dtype=x.dtype)[None, None, : x.shape[-2], :]
+    sin = sin.to(dtype=x.dtype)[None, None, : x.shape[-2], :]
+    even, odd = x[..., 0::2], x[..., 1::2]
+    rotated = torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1)
+    return rotated.flatten(-2)
+
+
 class SelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
@@ -59,13 +82,15 @@ class SelfAttention(nn.Module):
         self.output = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.dropout = config.dropout
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, rope_cos: torch.Tensor, rope_sin: torch.Tensor
+    ) -> torch.Tensor:
         batch, sequence, width = x.shape
         q, k, v = self.qkv(x).view(
             batch, sequence, 3, self.num_heads, self.head_dim
         ).permute(2, 0, 3, 1, 4)
-        q = _apply_rope(q, self.rope_theta)
-        k = _apply_rope(k, self.rope_theta)
+        q = _apply_rope_cached(q, rope_cos, rope_sin)
+        k = _apply_rope_cached(k, rope_cos, rope_sin)
         attended = F.scaled_dot_product_attention(
             q,
             k,
@@ -96,8 +121,10 @@ class TransformerBlock(nn.Module):
         self.mlp_norm = RMSNorm(config.hidden_size)
         self.mlp = SwiGLU(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(self.attention_norm(x))
+    def forward(
+        self, x: torch.Tensor, rope_cos: torch.Tensor, rope_sin: torch.Tensor
+    ) -> torch.Tensor:
+        x = x + self.attention(self.attention_norm(x), rope_cos, rope_sin)
         return x + self.mlp(self.mlp_norm(x))
 
 
@@ -109,10 +136,23 @@ class GPT(nn.Module):
         self.blocks = nn.ModuleList(
             TransformerBlock(config) for _ in range(config.num_layers)
         )
+        rope_cos, rope_sin = _build_rope_cache(
+            config.max_sequence_length,
+            config.hidden_size // config.num_heads,
+            config.rope_theta,
+            torch.device("cpu"),
+        )
+        self.register_buffer("rope_cos", rope_cos, persistent=False)
+        self.register_buffer("rope_sin", rope_sin, persistent=False)
         self.final_norm = RMSNorm(config.hidden_size)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.lm_head.weight = self.token_embedding.weight
         self.apply(self._init_weights)
+        residual_scale = 1.0 / math.sqrt(2 * config.num_layers)
+        with torch.no_grad():
+            for block in self.blocks:
+                block.attention.output.weight.mul_(residual_scale)
+                block.mlp.down.weight.mul_(residual_scale)
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -127,11 +167,20 @@ class GPT(nn.Module):
         if input_ids.shape[1] > self.config.max_sequence_length:
             raise ValueError("Input exceeds configured max_sequence_length")
         x = self.token_embedding(input_ids)
+        sequence_length = input_ids.shape[1]
+        rope_cos = self.rope_cos[:sequence_length]
+        rope_sin = self.rope_sin[:sequence_length]
         for block in self.blocks:
             if self.config.gradient_checkpointing and self.training:
-                x = checkpoint(block, x, use_reentrant=False)
+                x = checkpoint(
+                    block,
+                    x,
+                    rope_cos,
+                    rope_sin,
+                    use_reentrant=False,
+                )
             else:
-                x = block(x)
+                x = block(x, rope_cos, rope_sin)
         logits = self.lm_head(self.final_norm(x))
         loss = None
         if targets is not None:
