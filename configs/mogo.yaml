@@ -1,7 +1,7 @@
 seed: 1337
 
 data:
-  input_dir: ./data/books
+  input_dir: ./data
   output_dir: ./data/processed
   validation_fraction: 0.02
   vocab_size: 16384
@@ -15,15 +15,15 @@ model:
   max_sequence_length: 1024
   dropout: 0.0
   rope_theta: 10000.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 
 training:
   output_dir: ./checkpoints
   device: auto
   precision: bf16
-  micro_batch_size: 16
-  gradient_accumulation_steps: 1
-  eval_batch_size: 8
+  micro_batch_size: 2
+  gradient_accumulation_steps: 8
+  eval_batch_size: 2
   sequence_length: 1024
   max_steps: 100000
   learning_rate: 0.0003

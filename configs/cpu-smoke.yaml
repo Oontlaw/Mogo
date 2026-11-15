@@ -1,7 +1,7 @@
 seed: 1337
 
 data:
-  input_dir: ./data/books
+  input_dir: ./data
   output_dir: ./data/processed
   validation_fraction: 0.02
   vocab_size: 16384

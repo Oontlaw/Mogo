@@ -140,13 +140,21 @@ class TrainerTests(unittest.TestCase):
 
             straight_dir = root / "straight"
             resumed_dir = root / "resumed"
-            straight_config = write_training_config(straight_dir, 4)
+            straight_config = write_training_config(straight_dir, 10)
             resumed_config = write_training_config(resumed_dir, 2)
-            train(straight_config)
+            straight_output = io.StringIO()
+            with contextlib.redirect_stdout(straight_output):
+                train(straight_config)
+            self.assertIn("tokens/sec", straight_output.getvalue())
+            self.assertIn("elapsed", straight_output.getvalue())
             train(resumed_config)
 
-            resumed_config = write_training_config(resumed_dir, 4)
-            train(resumed_config, resume=True)
+            resumed_config = write_training_config(resumed_dir, 10)
+            resume_output = io.StringIO()
+            with contextlib.redirect_stdout(resume_output):
+                train(resumed_config, resume=True)
+            self.assertIn("Warning: LR schedule has changed", resume_output.getvalue())
+            self.assertIn("max_steps: saved=2, current=10", resume_output.getvalue())
 
             straight_state = torch.load(
                 straight_dir / "last.pt", map_location="cpu", weights_only=False
@@ -154,8 +162,12 @@ class TrainerTests(unittest.TestCase):
             resumed_state = torch.load(
                 resumed_dir / "last.pt", map_location="cpu", weights_only=False
             )
-            self.assertEqual(straight_state["step"], 4)
-            self.assertEqual(resumed_state["step"], 4)
+            self.assertEqual(straight_state["step"], 10)
+            self.assertEqual(resumed_state["step"], 10)
+            self.assertEqual(resumed_state["max_steps"], 10)
+            self.assertEqual(resumed_state["learning_rate"], 0.001)
+            self.assertEqual(resumed_state["min_learning_rate"], 0.001)
+            self.assertEqual(resumed_state["warmup_steps"], 0)
             self.assertEqual(straight_state["model_config"], resumed_state["model_config"])
             for name, straight_weight in straight_state["model"].items():
                 self.assertTrue(
@@ -194,24 +206,28 @@ class TrainerTests(unittest.TestCase):
                 straight_dir / "best.pt", map_location="cpu", weights_only=False
             )
             self.assertEqual(best_state["model_config"], straight_state["model_config"])
-            output = io.StringIO()
-            with patch.object(
-                sys,
-                "argv",
-                [
-                    "mogo.eval.generate",
-                    "--checkpoint",
-                    str(straight_dir / "last.pt"),
-                    "--tokenizer",
-                    str(data_dir / "tokenizer.json"),
-                    "--prompt",
-                    "Book",
-                    "--max-new-tokens",
-                    "1",
-                ],
-            ), contextlib.redirect_stdout(output):
-                generate_main()
-            self.assertIn("Book", output.getvalue())
+            self.assertEqual(
+                set(best_state), {"step", "model_config", "model", "val_loss"}
+            )
+            for checkpoint in ("best.pt", "last.pt"):
+                output = io.StringIO()
+                with patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "mogo.eval.generate",
+                        "--checkpoint",
+                        str(straight_dir / checkpoint),
+                        "--tokenizer",
+                        str(data_dir / "tokenizer.json"),
+                        "--prompt",
+                        "Book",
+                        "--max-new-tokens",
+                        "1",
+                    ],
+                ), contextlib.redirect_stdout(output):
+                    generate_main()
+                self.assertIn("Book", output.getvalue())
 
 
 if __name__ == "__main__":

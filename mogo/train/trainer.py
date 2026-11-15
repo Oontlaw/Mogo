@@ -1,6 +1,7 @@
 import argparse
 import math
 import random
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -193,6 +194,23 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         if not last_checkpoint.is_file():
             raise FileNotFoundError(f"Cannot resume; checkpoint not found: {last_checkpoint}")
         state = torch.load(last_checkpoint, map_location=device, weights_only=False)
+        schedule_keys = (
+            "max_steps",
+            "learning_rate",
+            "min_learning_rate",
+            "warmup_steps",
+        )
+        changed_schedule = [
+            f"{key}: saved={state.get(key, '<missing>')}, "
+            f"current={training_config[key]}"
+            for key in schedule_keys
+            if state.get(key) != training_config[key]
+        ]
+        if changed_schedule:
+            print(
+                "Warning: LR schedule has changed since the checkpoint "
+                f"({'; '.join(changed_schedule)})."
+            )
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         scaler.load_state_dict(state["scaler"])
@@ -223,6 +241,13 @@ def train(config_path: str | Path, resume: bool = False) -> None:
     batch_rng = np.random.default_rng(int(config["seed"]) + 1)
     if resume:
         batch_rng.bit_generator.state = batch_rng_state
+
+    training_start_time = time.perf_counter()
+    log_interval_start = training_start_time
+    tokens_since_log = 0
+    peak_gpu_memory_reported = False
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     for step in range(start_step, max_steps):
         learning_rate = cosine_learning_rate(
@@ -256,11 +281,19 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         scaler.update()
 
         completed_step = step + 1
+        tokens_since_log += batch_size * sequence_length * accumulation
         if completed_step % 10 == 0:
+            now = time.perf_counter()
+            interval_elapsed = now - log_interval_start
+            elapsed = now - training_start_time
+            tokens_per_second = tokens_since_log / max(interval_elapsed, 1e-9)
             print(
                 f"step {completed_step}/{max_steps} "
-                f"loss {total_loss / accumulation:.4f} lr {learning_rate:.6g}"
+                f"loss {total_loss / accumulation:.4f} lr {learning_rate:.6g} "
+                f"tokens/sec {tokens_per_second:.2f} elapsed {elapsed:.1f}s"
             )
+            tokens_since_log = 0
+            log_interval_start = now
         if completed_step % int(training_config["eval_interval"]) == 0:
             val_loss, perplexity = _evaluate(
                 model,
@@ -273,13 +306,18 @@ def train(config_path: str | Path, resume: bool = False) -> None:
                 amp_dtype,
             )
             print(f"validation loss {val_loss:.4f} perplexity {perplexity:.2f}")
+            if device.type == "cuda" and not peak_gpu_memory_reported:
+                peak_memory_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+                print(f"Peak GPU memory: {peak_memory_gb:.2f} GB")
+                peak_gpu_memory_reported = True
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_state = _checkpoint_state(
-                    model, optimizer, scaler, completed_step
-                )
-                best_state["batch_rng_state"] = batch_rng.bit_generator.state
-                best_state["val_loss"] = val_loss
+                best_state = {
+                    "step": completed_step,
+                    "model_config": asdict(model.config),
+                    "model": model.state_dict(),
+                    "val_loss": val_loss,
+                }
                 _save_checkpoint(best_checkpoint, best_state)
                 print(f"Saved best checkpoint to {best_checkpoint}")
         if completed_step % int(training_config["sample_interval"]) == 0:
@@ -301,6 +339,14 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         ):
             checkpoint_state = _checkpoint_state(model, optimizer, scaler, completed_step)
             checkpoint_state["batch_rng_state"] = batch_rng.bit_generator.state
+            checkpoint_state.update(
+                {
+                    "max_steps": max_steps,
+                    "learning_rate": float(training_config["learning_rate"]),
+                    "min_learning_rate": float(training_config["min_learning_rate"]),
+                    "warmup_steps": int(training_config["warmup_steps"]),
+                }
+            )
             _save_checkpoint(last_checkpoint, checkpoint_state)
             print(f"Saved checkpoint to {last_checkpoint}")
 
