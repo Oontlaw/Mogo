@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -44,9 +45,99 @@ class DataTests(unittest.TestCase):
             first.write_text("Same book\n", encoding="utf-8")
             duplicate.write_text("Same book\n", encoding="utf-8")
             different.write_text("Another book\n", encoding="utf-8")
-            unique, skipped = _unique_books([first, duplicate, different])
+            unique, skipped, _, skipped_files = _unique_books(
+                [first, duplicate, different]
+            )
             self.assertEqual(unique, [first, different])
             self.assertEqual(skipped, 1)
+            self.assertEqual(skipped_files, [(duplicate, "duplicate book content")])
+
+    def test_prepare_skips_empty_pdf_and_unreadable_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "books"
+            output_dir = root / "processed"
+            input_dir.mkdir()
+            for index in range(2):
+                (input_dir / f"book-{index}.txt").write_text(
+                    (f"Distinct book {index} text for tokenizer training. " * 20),
+                    encoding="utf-8",
+                )
+            empty_pdf = input_dir / "empty.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=100, height=100)
+            with empty_pdf.open("wb") as file:
+                writer.write(file)
+            unreadable = input_dir / "unreadable.txt"
+            unreadable.write_text("unreadable", encoding="utf-8")
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "seed": 17,
+                        "data": {
+                            "input_dir": str(input_dir),
+                            "output_dir": str(output_dir),
+                            "validation_fraction": 0.5,
+                            "vocab_size": 300,
+                            "min_token_frequency": 2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            from mogo.data import prepare as prepare_module
+
+            read_book_text = prepare_module.read_book_text
+
+            def read_book(path):
+                if Path(path) == unreadable:
+                    raise PermissionError("test unreadable file")
+                return read_book_text(path)
+
+            with patch("mogo.data.prepare.read_book_text", side_effect=read_book):
+                prepare(config_path)
+
+            skipped = (output_dir / "skipped_books.txt").read_text(encoding="utf-8")
+            self.assertIn(f"{empty_pdf}\t", skipped)
+            self.assertIn("may be scanned", skipped)
+            self.assertIn(f"{unreadable}\ttest unreadable file", skipped)
+            self.assertTrue((output_dir / "train.bin").is_file())
+            self.assertTrue((output_dir / "val.bin").is_file())
+
+    def test_prepare_errors_when_every_book_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "books"
+            output_dir = root / "processed"
+            input_dir.mkdir()
+            (input_dir / "unreadable.txt").write_text("bad", encoding="utf-8")
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "seed": 17,
+                        "data": {
+                            "input_dir": str(input_dir),
+                            "output_dir": str(output_dir),
+                            "validation_fraction": 0.5,
+                            "vocab_size": 300,
+                            "min_token_frequency": 2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "mogo.data.prepare.read_book_text",
+                side_effect=PermissionError("test unreadable file"),
+            ):
+                with self.assertRaisesRegex(ValueError, "No readable books"):
+                    prepare(config_path)
+            self.assertIn(
+                "test unreadable file",
+                (output_dir / "skipped_books.txt").read_text(encoding="utf-8"),
+            )
 
     def test_prepare_creates_outputs_from_three_text_books(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -24,9 +24,21 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _device(name: str) -> torch.device:
+def _device(name: str, allow_cpu: bool = False) -> torch.device:
     if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if allow_cpu:
+            return torch.device("cpu")
+        raise RuntimeError(
+            "CUDA was not found for device='auto'. "
+            f"torch.__version__={torch.__version__}, "
+            f"torch.version.cuda={torch.version.cuda}. "
+            "Check the driver with `nvidia-smi` and this interpreter with "
+            '`python -c "import torch; print(torch.__version__, '
+            'torch.version.cuda, torch.cuda.is_available())"`. '
+            "Use --allow-cpu only for CPU smoke runs."
+        )
     device = torch.device(name)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
@@ -128,7 +140,9 @@ def _evaluate(
     return mean_loss, math.exp(mean_loss)
 
 
-def train(config_path: str | Path, resume: bool = False) -> None:
+def train(
+    config_path: str | Path, resume: bool = False, allow_cpu: bool = False
+) -> None:
     config = load_config(config_path)
     _set_seed(int(config["seed"]))
     data_config, model_config, training_config = (
@@ -136,7 +150,7 @@ def train(config_path: str | Path, resume: bool = False) -> None:
         config["model"],
         config["training"],
     )
-    device = _device(training_config["device"])
+    device = _device(training_config["device"], allow_cpu=allow_cpu)
     amp_dtype = _precision_dtype(training_config["precision"], device)
     data_dir = Path(data_config["output_dir"])
     train_data = TokenMemmap(data_dir / "train.bin")
@@ -355,8 +369,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train MOGO")
     parser.add_argument("--config", default="configs/mogo.yaml")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--allow-cpu", action="store_true")
     args = parser.parse_args()
-    train(args.config, resume=args.resume)
+    train(args.config, resume=args.resume, allow_cpu=args.allow_cpu)
 
 
 if __name__ == "__main__":

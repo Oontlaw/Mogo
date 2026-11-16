@@ -14,10 +14,19 @@ from mogo.data.dataset import TokenMemmap
 from mogo.model.gpt import GPT, GPTConfig
 from mogo.data.prepare import prepare
 from mogo.eval.generate import main as generate_main
-from mogo.train.trainer import _evaluate, train
+from mogo.train.trainer import _device, _evaluate, train
 
 
 class TrainerTests(unittest.TestCase):
+    def test_auto_device_requires_cuda_unless_cpu_is_allowed(self):
+        with patch("mogo.train.trainer.torch.cuda.is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "CUDA was not found") as error:
+                _device("auto")
+            self.assertIn(str(torch.__version__), str(error.exception))
+            self.assertIn(str(torch.version.cuda), str(error.exception))
+            self.assertIn("nvidia-smi", str(error.exception))
+            self.assertEqual(_device("auto", allow_cpu=True), torch.device("cpu"))
+
     def test_validation_batches_repeat_without_changing_training_rng(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "val.bin"

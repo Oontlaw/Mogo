@@ -14,13 +14,19 @@ def train_tokenizer(
     book_paths: list[Path],
     vocab_size: int,
     min_frequency: int,
+    text_by_path: dict[Path, str] | None = None,
 ) -> Tokenizer:
     if not book_paths:
         raise ValueError("Cannot train a tokenizer without training books")
 
     def text_iterator() -> Iterator[str]:
         for path in book_paths:
-            yield clean_text(read_book_text(path))
+            text = (
+                text_by_path[path]
+                if text_by_path is not None
+                else read_book_text(path)
+            )
+            yield clean_text(text)
 
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
