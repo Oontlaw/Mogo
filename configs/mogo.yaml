@@ -6,6 +6,9 @@ data:
   validation_fraction: 0.02
   vocab_size: 16384
   min_token_frequency: 2
+  max_split_rate: 1.0
+  max_single_rate: 10.0
+  min_words: 10000
 
 model:
   hidden_size: 640

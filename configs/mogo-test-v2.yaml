@@ -1,0 +1,48 @@
+seed: 1337
+
+data:
+  input_dir: ./data
+  output_dir: ./data/processed
+  validation_fraction: 0.02
+  vocab_size: 16384
+  min_token_frequency: 2
+  max_split_rate: 1.0
+  max_single_rate: 10.0
+  min_words: 10000
+
+model:
+  hidden_size: 640
+  num_layers: 10
+  num_heads: 10
+  intermediate_size: 1728
+  max_sequence_length: 1024
+  dropout: 0.0
+  rope_theta: 10000.0
+  gradient_checkpointing: true
+
+training:
+  output_dir: ./checkpoints-test-v2
+  device: auto
+  precision: bf16
+  micro_batch_size: 4
+  gradient_accumulation_steps: 4
+  eval_batch_size: 2
+  sequence_length: 1024
+  max_steps: 300
+  learning_rate: 0.0003
+  min_learning_rate: 0.00003
+  warmup_steps: 20
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  gradient_clip: 1.0
+  eval_interval: 50
+  eval_batches: 10
+  save_interval: 50
+  sample_interval: 50
+
+generation:
+  prompt: "Once upon a time"
+  max_new_tokens: 100
+  temperature: 0.8
+  top_k: 50

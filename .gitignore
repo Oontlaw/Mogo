@@ -4,4 +4,5 @@ __pycache__/
 *.egg-info/
 data/books/
 data/processed/
+data/corpus/
 checkpoints/

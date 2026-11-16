@@ -90,6 +90,9 @@ class TrainerTests(unittest.TestCase):
                             "validation_fraction": 0.34,
                             "vocab_size": 300,
                             "min_token_frequency": 2,
+                            "max_split_rate": 10000.0,
+                            "max_single_rate": 10000.0,
+                            "min_words": 1,
                         },
                     }
                 ),
